@@ -1,35 +1,31 @@
 # Managed by distribute-build; edits are replaced
-name: docs
+name: actions
 on:
   push:
     branches: [main]
     paths:
-      - "**.md"
-      - "**.mdx"
-      - ".markdownlint*"
-      - ".prettierrc*"
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - ".actionlint*"
       - ".standards.yaml"
-      - ".github/workflows/docs.yml"
   pull_request:
     branches: [main]
     paths:
-      - "**.md"
-      - "**.mdx"
-      - ".markdownlint*"
-      - ".prettierrc*"
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - ".actionlint*"
       - ".standards.yaml"
-      - ".github/workflows/docs.yml"
   schedule:
     - cron: "25 4 3 * *"
   workflow_dispatch:
 concurrency:
-  group: docs-${{ github.ref }}
+  group: actions-${{ github.ref }}
   cancel-in-progress: true
 permissions:
   contents: read
 jobs:
-  docs:
-    # A scheduled run re-lints against the floating ci/docs@v2 image with no push;
+  actions:
+    # A scheduled run re-lints against the floating ci/actions@v2 image with no push;
     # distribute substitutes the per-repo cron above. Skip forks (no-op for push/PR).
     if: github.event_name != 'schedule' || github.event.repository.fork == false
     runs-on: ubuntu-latest
@@ -38,4 +34,4 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: nicerobot/tools.build/ci/docs@v2
+      - uses: nicerobot/tools.build/ci/actions@v2
