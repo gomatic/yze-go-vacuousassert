@@ -19,6 +19,7 @@ import (
 	"go/ast"
 	"go/printer"
 	"go/token"
+	"go/types"
 	"strings"
 
 	goyze "github.com/gomatic/go-yze"
@@ -66,8 +67,7 @@ func run(pass *analysis.Pass) (any, error) {
 		if !isComparison(call) || len(call.Args) < 3 {
 			return
 		}
-		subject := rooted(pass.Fset, call.Args[1])
-		if subject != "" && subject == rooted(pass.Fset, call.Args[2]) {
+		if subject, vacuous := builtFromTheOther(pass.TypesInfo, pass.Fset, call.Args[1], call.Args[2]); vacuous {
 			pass.Reportf(call.Pos(), message, subject)
 		}
 	})
@@ -85,8 +85,39 @@ func isComparison(call *ast.CallExpr) bool {
 	return isIdent && assertionPackages[pkg.Name] && comparisons[selector.Sel.Name]
 }
 
-// rooted is an expression with its trailing METHOD CALLS removed, so the two
-// sides of an assertion can be compared for being the same thing.
+// builtFromTheOther reports whether one side of the assertion was CONSTRUCTED
+// OUT OF the other, and names the side it was built from.
+//
+// That is the defect, and it is not the same question as "do both sides root to
+// the same place". An assertion is vacuous when the expected value is derived
+// from the very thing it is compared against — `ErrThing.With(nil)` against
+// `ErrThing` — because then it holds whatever the code under test does. Two
+// SIBLINGS reached from one value are not that: `v.Left()` and `v.Right()` both
+// root to `v`, and comparing them is an ordinary, falsifiable assertion about
+// two different projections.
+//
+// Comparing roots symmetrically confused the two and reported every sibling
+// pair. Across the fleet that, together with the package-qualified case in
+// [rooted], was 40 of 49 findings. So the test is directional: a side is
+// vacuous when stripping its method calls yields the OTHER SIDE AS WRITTEN.
+// Identical expressions satisfy it in both directions and are still reported.
+func builtFromTheOther(info *types.Info, fset *token.FileSet, left, right ast.Expr) (string, bool) {
+	leftText, rightText := render(fset, left), render(fset, right)
+	if leftText == "" || rightText == "" {
+		return "", false
+	}
+	if rooted(info, fset, left) == rightText {
+		return rightText, true
+	}
+	if rooted(info, fset, right) == leftText {
+		return leftText, true
+	}
+
+	return "", false
+}
+
+// rooted is an expression with its trailing METHOD CALLS removed, so one side of
+// an assertion can be tested for having been built out of the other.
 //
 // `ErrThing.With(nil)` roots to `ErrThing`, which is what makes it the same side
 // as a bare `ErrThing`. A call on something else — `report(nil)`, `f(x).Field` —
@@ -96,14 +127,22 @@ func isComparison(call *ast.CallExpr) bool {
 // A TYPE ASSERTION is deliberately not stripped. `v.(Foo)` and `v.(Bar)` are two
 // different values of one variable, so rooting through one would report an
 // assertion comparing two genuinely different things.
-func rooted(fset *token.FileSet, expr ast.Expr) string {
+//
+// A PACKAGE-QUALIFIED CALL IS NOT A METHOD CALL AND IS NEVER STRIPPED.
+// `strings.Index(a, b)` selects Index from the package strings, so there is no
+// receiver under it; stripping it would root the call to the bare word
+// `strings`, and every call into that package would then root to the same
+// string and compare equal to every other. That is not a corner case: it was
+// 55% of this rule's findings across the fleet, comparing two genuinely
+// different calls and calling them one expression.
+func rooted(info *types.Info, fset *token.FileSet, expr ast.Expr) string {
 	for {
 		switch typed := expr.(type) {
 		case *ast.ParenExpr:
 			expr = typed.X
 		case *ast.CallExpr:
 			method, isMethod := typed.Fun.(*ast.SelectorExpr)
-			if !isMethod {
+			if !isMethod || !rootsThroughReceiver(info, method) {
 				return render(fset, expr)
 			}
 			expr = method.X
@@ -111,6 +150,36 @@ func rooted(fset *token.FileSet, expr ast.Expr) string {
 			return render(fset, expr)
 		}
 	}
+}
+
+// rootsThroughReceiver reports whether the selector reaches a method through a
+// VALUE, which is the only shape rooting is for.
+//
+// A selector whose left side is not an identifier — `f(x).Method()`,
+// `a.b.Method()` — is reaching through an expression, so it always has a
+// receiver. An identifier is the ambiguous case: it is a receiver when it names
+// a value and a package qualifier when it names an import, and only the type
+// checker can tell them apart.
+//
+// An identifier the type checker cannot resolve is treated as NOT a receiver,
+// which is the direction that fails safe. Stripping is what makes two sides
+// equal, so a wrong strip invents a finding while a missed strip only withholds
+// one, and this rule's cost has been false positives rather than silence.
+func rootsThroughReceiver(info *types.Info, selector *ast.SelectorExpr) bool {
+	identifier, isIdentifier := selector.X.(*ast.Ident)
+	if !isIdentifier {
+		return true
+	}
+	if info == nil {
+		return false
+	}
+	used := info.Uses[identifier]
+	if used == nil {
+		return false
+	}
+	_, isPackage := used.(*types.PkgName)
+
+	return !isPackage
 }
 
 // render is an expression as it was written, for comparing two of them and for

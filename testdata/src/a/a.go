@@ -3,6 +3,7 @@ package a
 import (
 	"assert"
 	"require"
+	"shape"
 )
 
 type Const string
@@ -47,6 +48,23 @@ func Cases(t assert.T, r require.T) {
 	// One-sided assertions have no two sides to be the same.
 	assert.True(t, ErrThing != "")
 	assert.NoError(t, nil)
+
+
+	// A PACKAGE-QUALIFIED CALL is not a method call. Both sides reach into the
+	// same package and are otherwise unrelated; rooting through the qualifier
+	// would collapse them to the bare word `shape` and report them as one
+	// expression. This was 55% of the rule's fleet findings.
+	assert.Equal(t, shape.Index("a", "b"), shape.Index("c", "d"))
+
+	// TWO SIBLINGS reached from one receiver are two different projections, not
+	// one expression built from the other. Both root to `v`, and comparing roots
+	// symmetrically reported them.
+	v := ErrThing
+	assert.Equal(t, v.Error(), string(v.Wrapped()))
+
+	// The DIRECTIONAL test still catches the founding defect in both orders:
+	// one side strips to the other AS WRITTEN.
+	assert.ErrorIs(t, ErrThing, ErrThing.With(nil)) // want `compares ErrThing with itself`
 
 	// A comparison that is not testify's is not this rule's business.
 	_ = same(ErrThing, ErrThing)
